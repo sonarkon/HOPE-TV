@@ -24,12 +24,12 @@ re-laid-out, shorter-wire layout; `prototyp` is the original wiring.
 |---|---|---|---|
 | VCC | 3V3 | 3V3 | |
 | GND | GND | GND | |
-| LED / Backlight | D1 (GPIO5) | D1 (GPIO5) | see rewiring note below |
-| A0 / DC | D2 (GPIO4) | D3 (GPIO0) | |
-| RESET | D3 (GPIO0) | D4 (GPIO2) | |
 | CS | D4 (GPIO2) | D2 (GPIO4) | deliberately never D8 (boot issues) |
-| SCK | D5 (GPIO14) | D5 (GPIO14) | Hardware SPI SCK, fixed on the ESP8266 |
+| RESET | D3 (GPIO0) | D4 (GPIO2) | |
+| A0 / DC | D2 (GPIO4) | D3 (GPIO0) | |
 | SDA / MOSI | D7 (GPIO13) | D7 (GPIO13) | Hardware SPI MOSI, fixed on the ESP8266 |
+| SCK | D5 (GPIO14) | D5 (GPIO14) | Hardware SPI SCK, fixed on the ESP8266 |
+| LED / Backlight | D1 (GPIO5) | D1 (GPIO5) | see rewiring note below |
 
 D0 and D8 are deliberately avoided in both layouts: they have special
 boot-strapping functions and can easily cause boot loops or a dead display.
