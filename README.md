@@ -124,19 +124,9 @@ The exact same set of commands also works by typing into the Serial Monitor
 prefix: `mode 3`, `brightness 0.5`, `clip 1`, `clips` (lists found GIFs),
 `help` (full command list).
 
-## Diagnostic sketch
-
-`hopetv_diagnose/` is a standalone, minimal sketch used while bringing up
-the display hardware for the first time — it cycles through several ST7735
-init variants with a very visible manual RESET pulse, to distinguish a
-wiring problem (RESET/CS/SPI) from simply picking the wrong init variant. Not
-needed for normal use, kept here for reference / re-use on a new board.
-
 ## Repo layout
 
 ```
 hopetv/             the sketch: hopetv.ino, data/ (GIFs + config),
                      video/ (source clips, .mov gitignored), 3d print/ (enclosure STL files)
-hopetv_diagnose/     standalone hardware bring-up/diagnostic sketch
-docs/                display datasheet (pinout + specs)
 ```
