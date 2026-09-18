@@ -6,7 +6,7 @@
 
 # Raw source videos (too large for git, kept locally only - the converted
 # 128x128 GIFs actually used by the firmware live in data/ and ARE tracked)
-hopetv_v2/video/*.mov
+hopetv/video/*.mov
 
 # Personal German-language working notes, not part of the public docs
 hopetv/CODEBUCH.md
