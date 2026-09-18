@@ -1,0 +1,9 @@
+# Copy this file to config.txt and fill in your own values, then upload
+# it with the LittleFS data upload tool (see README). If config.txt is
+# missing, the sketch falls back to the placeholder defaults hardcoded in
+# the .ino file, which will NOT connect to any real network.
+ssid=YOUR_WIFI_SSID
+password=YOUR_WIFI_PASSWORD
+oscport=9000
+# pinout=v2 (current/short-wire board) or pinout=prototyp (original board)
+pinout=v2
