@@ -13,45 +13,26 @@ an OSC sender).
   Display Module ST7735 128x128")
 - USB power (5V) or a regulated 3.0–3.6V source wired directly to the 3V3 pin
 
-## Two pinout profiles, one codebase
+## Pinout
 
-`hopetv/` and `hopetv_v2/` contain **identical firmware** — the only
-difference is which physical board layout each one targets, selected at
-runtime via the `pinout` key in `config.txt` (see below). Having two sketch
-folders is just a convenience for flashing two physical devices with
-different wiring from the Arduino IDE without hand-editing anything.
+One firmware, two supported wiring layouts — which one is active is chosen
+at runtime via the `pinout` key in `config.txt` (`v2` or `prototyp`, see
+below), no code changes needed. `v2` is the current/default board with a
+re-laid-out, shorter-wire layout; `prototyp` is the original wiring.
 
-### Pinout `prototyp` (original wiring)
-
-| Display pin | D1 mini pin | GPIO | Note |
+| Display pin | `v2` (default) | `prototyp` (original) | Note |
 |---|---|---|---|
-| VCC | 3V3 | – | |
-| GND | GND | – | |
-| CS | D2 | GPIO4 | deliberately not D8 (boot issues) |
-| RESET | D4 | GPIO2 | |
-| A0 / DC | D3 | GPIO0 | Data/Command |
-| SDA / MOSI | D7 | GPIO13 | Hardware SPI MOSI (fixed on the ESP8266) |
-| SCK | D5 | GPIO14 | Hardware SPI SCK (fixed on the ESP8266) |
-| LED / Backlight | D1 | GPIO5 | |
+| VCC | 3V3 | 3V3 | |
+| GND | GND | GND | |
+| LED / Backlight | D1 (GPIO5) | D1 (GPIO5) | see rewiring note below |
+| A0 / DC | D2 (GPIO4) | D3 (GPIO0) | |
+| RESET | D3 (GPIO0) | D4 (GPIO2) | |
+| CS | D4 (GPIO2) | D2 (GPIO4) | deliberately never D8 (boot issues) |
+| SCK | D5 (GPIO14) | D5 (GPIO14) | Hardware SPI SCK, fixed on the ESP8266 |
+| SDA / MOSI | D7 (GPIO13) | D7 (GPIO13) | Hardware SPI MOSI, fixed on the ESP8266 |
 
-D0 and D8 are deliberately avoided: both have special boot-strapping
-functions and can easily cause boot loops or a dead display if used here.
-
-### Pinout `v2` (default, re-laid-out board)
-
-Same fixed hardware-SPI pins (D5/D7), but the freely assignable signals
-(LED/A0/RESET/CS) sit on the neighboring pins D1–D4 for shorter wiring runs.
-
-| Display pin | D1 mini pin | GPIO | Note |
-|---|---|---|---|
-| VCC | 3V3 | – | |
-| GND | GND | – | |
-| LED / Backlight | D1 | GPIO5 | |
-| A0 / DC | D2 | GPIO4 | |
-| RESET | D3 | GPIO0 | |
-| CS | D4 | GPIO2 | |
-| SCK | D5 | GPIO14 | Hardware SPI SCK, fixed |
-| SDA / MOSI | D7 | GPIO13 | Hardware SPI MOSI, fixed |
+D0 and D8 are deliberately avoided in both layouts: they have special
+boot-strapping functions and can easily cause boot loops or a dead display.
 
 ### Backlight rewiring (required for brightness/power control)
 
@@ -74,10 +55,10 @@ commands only blank the drawn image, not the actual backlight.
    - `Adafruit ST7735 and ST7789 Library` (a version with `enableDisplay()`)
    - `OSC` (by CNMAT / Adrian Freed)
    - `AnimatedGIF` (by bitbank2)
-4. **WiFi/OSC config**: copy `data/config.example.txt` to `data/config.txt`
-   in whichever sketch folder you're flashing, and fill in your own
-   `ssid`/`password`. `config.txt` is gitignored on purpose — never commit
-   your real WiFi credentials.
+4. **WiFi/OSC config**: copy `hopetv/data/config.example.txt` to
+   `hopetv/data/config.txt` and fill in your own `ssid`/`password` (and
+   `pinout`, if you're on the `prototyp` wiring). `config.txt` is gitignored
+   on purpose — never commit your real WiFi credentials.
 5. **Upload the data folder** with a LittleFS uploader (IDE 2.x: the
    [arduino-littlefs-upload](https://github.com/earlephilhower/arduino-littlefs-upload)
    plugin, run via the command palette — "Upload LittleFS to Pico/ESP8266/ESP32";
@@ -101,9 +82,20 @@ unless you turn that on explicitly (`/hopetv/auto 1`).
 
 Playback decodes and draws the GIF one row at a time via the `AnimatedGIF`
 library, so it stays RAM-friendly regardless of clip length. `data/` already
-ships with two example clips — see `hopetv_v2/video/` for the source videos
-and the ffmpeg command used to convert them (crop to square, scale to
-128x128, reduce palette, optionally desaturate for smaller file size).
+ships with two example clips; the source videos are in `hopetv/video/`.
+
+**Creating a new clip**, roughly (adjust the crop values to your source
+video — check for letterboxing/aspect ratio first):
+
+```bash
+ffmpeg -i input.mov -vf "crop=<w>:<h>:<x>:<y>,scale=128:128:flags=lanczos,\
+fps=12,split[s0][s1];[s0]palettegen=max_colors=64[p];\
+[s1][p]paletteuse=dither=bayer" -loop 0 clipN.gif
+```
+
+Keep clips short (a few seconds) and the palette small (32–128 colors, or
+add `hue=s=0` before `split` to desaturate) — file size scales with both
+length and color complexity, and LittleFS space is limited (a few MB).
 
 ## OSC commands (default port 9000)
 
@@ -143,9 +135,8 @@ needed for normal use, kept here for reference / re-use on a new board.
 ## Repo layout
 
 ```
-hopetv/            prototype pinout, own data/ folder (GIFs + config)
-hopetv_v2/          v2 pinout, own data/ folder, plus video/ (source clips,
-                    gitignored) and 3d print/ (enclosure STL files)
-hopetv_diagnose/    standalone hardware bring-up/diagnostic sketch
-docs/               display datasheet (pinout + specs)
+hopetv/             the sketch: hopetv.ino, data/ (GIFs + config),
+                     video/ (source clips, .mov gitignored), 3d print/ (enclosure STL files)
+hopetv_diagnose/     standalone hardware bring-up/diagnostic sketch
+docs/                display datasheet (pinout + specs)
 ```
