@@ -25,27 +25,46 @@
 //   "Adafruit ST7735 and ST7789 Library" (version with enableDisplay()!)
 //   "OSC" (by CNMAT / Adrian Freed)
 //   "AnimatedGIF" (by bitbank2)
+//   "JPEGDEC" (by bitbank2)
 // LittleFS, ESP8266WiFi, WiFiUdp are part of the ESP8266 board package.
 //
-// GIF files: drop any number of .gif files (128x128) into the /data folder
-// and upload them with the "ESP8266 LittleFS Data Upload" plugin - they are
-// auto-detected at boot (sorted alphabetically, addressable via index
-// 0,1,2,..., see the serial command "clips"). Default behavior: the device
-// boots straight into GIF mode and loops clip2.gif if present, otherwise the
-// first file found (no auto-cycling through all modes). Optional:
-// /data/config.txt for SSID/password/OSC port without reflashing.
+// Clip files: drop any number of .gif / .mjpg / .jpg(.jpeg) files (128x128)
+// into the /data folder and upload them with the "ESP8266 LittleFS Data
+// Upload" plugin - they are auto-detected at boot (sorted alphabetically,
+// addressable via index 0,1,2,..., see the serial command "clips"), and each
+// plays with the decoder matching its extension: .gif via AnimatedGIF,
+// .mjpg via a small custom Motion-JPEG player (see below), a lone .jpg/.jpeg
+// is treated as a still image and just held on screen. Default behavior: the
+// device boots straight into clip mode and loops clip2.gif if present,
+// otherwise the first file found (no auto-cycling through all modes).
+//
+// .mjpg format: NOT a standard container - a simple custom format made for
+// this project (see ../tools/frame_mjpeg.py in the repo root): repeated
+// [4-byte little-endian frame length][one JFIF/JPEG frame's bytes], nothing
+// else. Makes on-device frame reading trivial (no marker-scanning needed).
+// To make one: encode a short 128x128 clip as concatenated JPEG frames with
+// ffmpeg, e.g.
+//   ffmpeg -i input.mov -vf fps=12 -c:v mjpeg -q:v 10 -an -f mjpeg raw.mjpeg
+// then run `python3 tools/frame_mjpeg.py raw.mjpeg output.mjpg`.
+//
+// Slideshow: separate, dedicated mode - put .jpg/.jpeg stills into
+// /data/slideshow/ and upload them; they auto-advance every 4 seconds,
+// looping forever, independent of the main clip playlist above.
+//
+// Optional: /data/config.txt for SSID/password/OSC port without reflashing.
 //
 // OSC commands (port from config.txt / default 9000):
-//   /hopetv/mode        int   0=Test pattern 1=Noise 2=Animation 3=GIF
+//   /hopetv/mode        int   0=Test pattern 1=Noise 2=Animation 3=Clip
 //   /hopetv/auto        int   0/1  auto mode-cycling off/on
-//   /hopetv/debug       int   0=off 1=info (IP/port/GIF count/last command)
-//                              2=file list (found GIFs, paginated every 2s)
+//   /hopetv/debug       int   0=off 1=info (IP/port/clip+slide count/last command)
+//                              2=file list (found clips, paginated every 2s)
 //   /hopetv/power       int   0/1  display off/on
 //   /hopetv/brightness  float 0.0-1.0  backlight brightness (see note above)
 //   /hopetv/fps         float 1-60  frame rate for noise/animation
 //   /hopetv/bw          int   0/1  black & white filter off/on
-//   /hopetv/clip        int   index  select GIF by index (0-based, alphabetically
-//                              sorted, see serial "clips"), switches to GIF mode
+//   /hopetv/clip        int   index  select a clip by index (0-based, alphabetically
+//                              sorted, see serial "clips"), switches to clip mode
+//   /hopetv/slideshow   int   0/1  slideshow mode off/on (see above)
 //
 // The same commands also work via the Serial Monitor (115200 baud, line
 // ending "Newline"), no OSC sender needed for testing: e.g. "mode 3",
@@ -64,6 +83,7 @@
 #include <LittleFS.h>
 #include <OSCMessage.h>
 #include <AnimatedGIF.h>
+#include <JPEGDEC.h>
 
 Adafruit_ST7735 *tft;
 int8_t pinCS, pinDC, pinRST, pinBacklight;
@@ -98,13 +118,36 @@ WiFiUDP udp;
 AnimatedGIF gif;
 File gifFile;
 bool gifOffen = false;
-String GIF_DATEI = "/clip2.gif"; // may be overridden by sucheGifs()/waehleStandardClip()
+
+// Allocated on the heap in setup(), not a global object: JPEGDEC's internal
+// decode buffers/Huffman tables are ~18KB, which alone would overflow the
+// ESP8266's small (80KB) fixed region for global/static variables.
+JPEGDEC *jpeg;
+
+enum ClipTyp { CLIP_GIF, CLIP_MJPG, CLIP_STILL };
 
 #define MAX_CLIPS 16
 String clipListe[MAX_CLIPS];
+ClipTyp clipTypListe[MAX_CLIPS];
 int anzahlClips = 0;
+String aktuellerClipPfad = "/clip2.gif"; // may be overridden by sucheClips()/waehleStandardClip()
+ClipTyp aktuellerClipTyp = CLIP_GIF;
 
-enum Mode { TESTBILD, RAUSCHEN, ANIMATION, GIFMODUS, DEBUG };
+// Motion-JPEG playback (custom .mjpg container, see header comment above)
+File mjpgFile;
+bool mjpgOffen = false;
+uint8_t mjpgFrameBuf[8192]; // generous headroom over the ~3.3KB max frame seen so far
+const unsigned long MJPG_FRAME_MS = 83; // ~12 fps, matches how clips are encoded
+
+// Slideshow: separate file list + own mode, independent of the clip playlist
+#define MAX_SLIDES 32
+String slideListe[MAX_SLIDES];
+int anzahlSlides = 0;
+int slideIndex = 0;
+unsigned long slideStart = 0;
+const unsigned long SLIDE_DAUER = 4000; // 4s per image
+
+enum Mode { TESTBILD, RAUSCHEN, ANIMATION, GIFMODUS, SLIDESHOW, DEBUG };
 Mode mode = GIFMODUS; // default: loop clip2.gif directly, no auto-cycling
 bool autoCycle = false;
 bool powerOn = true;
@@ -141,7 +184,8 @@ void setup() {
 
   ladeConfig(); // mounts LittleFS, reads SSID/password/port/pinout
   waehlePinout();
-  sucheGifs();
+  sucheClips();
+  sucheSlideshow();
   waehleStandardClip();
 
   tft = new Adafruit_ST7735(pinCS, pinDC, pinRST);
@@ -154,6 +198,7 @@ void setup() {
   setzeHelligkeit(brightness);
 
   gif.begin(LITTLE_ENDIAN_PIXELS);
+  jpeg = new JPEGDEC();
 
   bootSplashActive = true;
   bootSplashStart = millis();
@@ -176,6 +221,13 @@ void loop() {
 
   if (!powerOn) return;
 
+  if (mode == SLIDESHOW) {
+    if (millis() - slideStart > SLIDE_DAUER) {
+      zeigeSlide(slideIndex + 1);
+    }
+    return;
+  }
+
   if (mode == DEBUG) {
     if (debugModus == 2) {
       // only redraw at all when there are multiple pages (to page through) -
@@ -193,14 +245,23 @@ void loop() {
 
   if (autoCycle && millis() - modeStart > MODE_DAUER) {
     modeStart = millis();
-    if (mode == GIFMODUS) beendeGif();
+    if (mode == GIFMODUS) { beendeGif(); beendeMjpeg(); }
     mode = (Mode)((mode + 1) % 4); // cycles TESTBILD/RAUSCHEN/ANIMATION/GIFMODUS
     tft->fillScreen(ST77XX_BLACK);
     if (mode == TESTBILD) zeichneTestbild();
+    else if (mode == GIFMODUS && aktuellerClipTyp == CLIP_STILL) zeigeStandbild(aktuellerClipPfad);
   }
 
   if (mode == GIFMODUS) {
-    spieleGifFrame(); // times itself via the GIF's own frame delays
+    if (aktuellerClipTyp == CLIP_MJPG) {
+      if (millis() - lastFrame >= MJPG_FRAME_MS) {
+        lastFrame = millis();
+        spieleMjpegFrame();
+      }
+    } else if (aktuellerClipTyp == CLIP_GIF) {
+      spieleGifFrame(); // times itself via the GIF's own frame delays
+    }
+    // CLIP_STILL: nothing to do each frame, already drawn once on selection
   } else if (millis() - lastFrame >= frameIntervalMs) {
     lastFrame = millis();
     switch (mode) {
@@ -248,31 +309,43 @@ void ladeConfig() {
   Serial.println("config.txt geladen");
 }
 
-void sucheGifs() {
+// Recognizes .gif, .mjpg (custom container, see header) and .jpg/.jpeg
+// (single still image) - anything else in the root folder is ignored, so
+// e.g. config.txt or the slideshow/ subfolder are naturally skipped.
+void sucheClips() {
   anzahlClips = 0;
   Dir dir = LittleFS.openDir("/");
   while (dir.next() && anzahlClips < MAX_CLIPS) {
     String name = dir.fileName();
     String nameLower = name;
     nameLower.toLowerCase();
-    if (!nameLower.endsWith(".gif")) continue;
+    ClipTyp typ;
+    if (nameLower.endsWith(".gif")) typ = CLIP_GIF;
+    else if (nameLower.endsWith(".mjpg")) typ = CLIP_MJPG;
+    else if (nameLower.endsWith(".jpg") || nameLower.endsWith(".jpeg")) typ = CLIP_STILL;
+    else continue;
     if (!name.startsWith("/")) name = "/" + name;
-    clipListe[anzahlClips++] = name;
+    clipListe[anzahlClips] = name;
+    clipTypListe[anzahlClips] = typ;
+    anzahlClips++;
   }
-  // simple sort (alphabetical), lists are small
+  // simple sort (alphabetical, both arrays in lockstep), lists are small
   for (int i = 0; i < anzahlClips - 1; i++) {
     for (int j = 0; j < anzahlClips - 1 - i; j++) {
       if (clipListe[j] > clipListe[j + 1]) {
-        String tausch = clipListe[j];
+        String tauschName = clipListe[j];
         clipListe[j] = clipListe[j + 1];
-        clipListe[j + 1] = tausch;
+        clipListe[j + 1] = tauschName;
+        ClipTyp tauschTyp = clipTypListe[j];
+        clipTypListe[j] = clipTypListe[j + 1];
+        clipTypListe[j + 1] = tauschTyp;
       }
     }
   }
   filelistSeitenAnzahl = max(1, (anzahlClips + FILELIST_ZEILEN_PRO_SEITE - 1) / FILELIST_ZEILEN_PRO_SEITE);
 
   Serial.print(anzahlClips);
-  Serial.println(" GIF-Datei(en) gefunden:");
+  Serial.println(" Clip-Datei(en) gefunden:");
   for (int i = 0; i < anzahlClips; i++) {
     Serial.print("  ");
     Serial.print(i);
@@ -281,14 +354,44 @@ void sucheGifs() {
   }
 }
 
+// Scans /slideshow (separate from the main clip playlist above) for stills.
+void sucheSlideshow() {
+  anzahlSlides = 0;
+  Dir dir = LittleFS.openDir("/slideshow");
+  while (dir.next() && anzahlSlides < MAX_SLIDES) {
+    String name = dir.fileName();
+    int slash = name.lastIndexOf('/');
+    if (slash >= 0) name = name.substring(slash + 1); // defensive: keep just the basename
+    String nameLower = name;
+    nameLower.toLowerCase();
+    if (!(nameLower.endsWith(".jpg") || nameLower.endsWith(".jpeg"))) continue;
+    slideListe[anzahlSlides++] = "/slideshow/" + name;
+  }
+  for (int i = 0; i < anzahlSlides - 1; i++) {
+    for (int j = 0; j < anzahlSlides - 1 - i; j++) {
+      if (slideListe[j] > slideListe[j + 1]) {
+        String tausch = slideListe[j];
+        slideListe[j] = slideListe[j + 1];
+        slideListe[j + 1] = tausch;
+      }
+    }
+  }
+  Serial.print(anzahlSlides);
+  Serial.println(" Slideshow-Bild(er) gefunden");
+}
+
 void waehleStandardClip() {
   for (int i = 0; i < anzahlClips; i++) {
-    if (clipListe[i] == "/clip2.gif") {
-      GIF_DATEI = clipListe[i];
+    if (clipListe[i] == "/clip2.gif" || clipListe[i] == "/01_clip2.gif") {
+      aktuellerClipPfad = clipListe[i];
+      aktuellerClipTyp = clipTypListe[i];
       return;
     }
   }
-  if (anzahlClips > 0) GIF_DATEI = clipListe[0];
+  if (anzahlClips > 0) {
+    aktuellerClipPfad = clipListe[0];
+    aktuellerClipTyp = clipTypListe[0];
+  }
 }
 
 void verbindeWLAN(int y) {
@@ -345,11 +448,12 @@ void setzeHelligkeit(float b) {
 // Core functions: shared by both OSC handlers AND serial test commands
 
 void setzeModus(int m) {
-  if (mode == GIFMODUS) beendeGif();
+  if (mode == GIFMODUS) { beendeGif(); beendeMjpeg(); }
   mode = (Mode)constrain(m, 0, 3);
   autoCycle = false;
   tft->fillScreen(ST77XX_BLACK);
   if (mode == TESTBILD) zeichneTestbild();
+  else if (mode == GIFMODUS && aktuellerClipTyp == CLIP_STILL) zeigeStandbild(aktuellerClipPfad);
   modeStart = millis();
 }
 
@@ -370,7 +474,7 @@ void setzeDebugModus(int stufe) {
   debugModus = neueStufe;
 
   if (debugModus > 0) {
-    if (mode == GIFMODUS) beendeGif();
+    if (mode == GIFMODUS) { beendeGif(); beendeMjpeg(); }
     mode = DEBUG;
     autoCycle = false;
     filelistSeite = 0;
@@ -389,6 +493,7 @@ void setzeDebugModus(int stufe) {
     autoCycle = autoCycleVorDebug;
     tft->fillScreen(ST77XX_BLACK);
     if (mode == TESTBILD) zeichneTestbild();
+    else if (mode == GIFMODUS && aktuellerClipTyp == CLIP_STILL) zeigeStandbild(aktuellerClipPfad);
     modeStart = millis();
   }
 }
@@ -420,15 +525,37 @@ void setzeBW(bool an) {
 
 void setzeClip(int index) {
   if (anzahlClips == 0) {
-    Serial.println("Keine GIF-Dateien gefunden (LittleFS-Upload gemacht?)");
+    Serial.println("Keine Clip-Dateien gefunden (LittleFS-Upload gemacht?)");
     return;
   }
   index = constrain(index, 0, anzahlClips - 1);
-  GIF_DATEI = clipListe[index];
-  beendeGif(); // closes any open file, the next frame opens the new one
+  aktuellerClipPfad = clipListe[index];
+  aktuellerClipTyp = clipTypListe[index];
+  beendeGif();   // closes whichever was open - the next frame opens the new clip
+  beendeMjpeg();
   mode = GIFMODUS;
   autoCycle = false;
   modeStart = millis();
+  if (aktuellerClipTyp == CLIP_STILL) zeigeStandbild(aktuellerClipPfad);
+}
+
+void setzeSlideshow(bool an) {
+  if (an) {
+    if (anzahlSlides == 0) {
+      Serial.println("Keine Slideshow-Bilder gefunden (data/slideshow/ hochgeladen?)");
+      return;
+    }
+    if (mode == GIFMODUS) { beendeGif(); beendeMjpeg(); }
+    mode = SLIDESHOW;
+    autoCycle = false;
+    zeigeSlide(0);
+  } else {
+    mode = GIFMODUS;
+    autoCycle = false;
+    tft->fillScreen(ST77XX_BLACK);
+    if (aktuellerClipTyp == CLIP_STILL) zeigeStandbild(aktuellerClipPfad);
+    modeStart = millis();
+  }
 }
 
 // OSC handlers: thin wrappers around the core functions above
@@ -473,6 +600,11 @@ void handleOscClip(OSCMessage &msg) {
   setzeClip(msg.getInt(0));
 }
 
+void handleOscSlideshow(OSCMessage &msg) {
+  bootSplashActive = false;
+  setzeSlideshow(msg.getInt(0) != 0);
+}
+
 // Serial test commands, e.g. "mode 3", "brightness 0.5", "clip 1" - "help" for the list.
 // Set the Serial Monitor's line ending to "Newline".
 void pruefeSerialBefehle() {
@@ -491,20 +623,23 @@ void pruefeSerialBefehle() {
   if (befehl == "help" || befehl == "?") {
     Serial.println("Befehle: mode <0-3> | auto <0/1> | debug <0-2> | power <0/1> |");
     Serial.println("         brightness <0.0-1.0> | fps <1-60> | bw <0/1> |");
-    Serial.println("         clip <index> | clips (Liste der gefundenen GIFs)");
+    Serial.println("         clip <index> | clips (Liste der gefundenen Clips) |");
+    Serial.println("         slideshow <0/1>");
     Serial.println("debug: 0=aus 1=Info 2=Dateiliste");
     return;
   }
 
   if (befehl == "clips") {
     Serial.print(anzahlClips);
-    Serial.println(" GIF-Datei(en):");
+    Serial.println(" Clip-Datei(en):");
     for (int i = 0; i < anzahlClips; i++) {
       Serial.print("  ");
       Serial.print(i);
       Serial.print(": ");
       Serial.println(clipListe[i]);
     }
+    Serial.print(anzahlSlides);
+    Serial.println(" Slideshow-Bild(er)");
     return;
   }
 
@@ -512,7 +647,7 @@ void pruefeSerialBefehle() {
 
   bool bekannt = (befehl == "mode" || befehl == "auto" || befehl == "debug" ||
                   befehl == "power" || befehl == "brightness" || befehl == "fps" ||
-                  befehl == "bw" || befehl == "clip");
+                  befehl == "bw" || befehl == "clip" || befehl == "slideshow");
   letzterOscBefehl = "serial:" + zeile + (bekannt ? " [OK]" : " [?]");
 
   if (befehl == "mode") setzeModus(wert.toInt());
@@ -523,6 +658,7 @@ void pruefeSerialBefehle() {
   else if (befehl == "fps") setzeFps(wert.toFloat());
   else if (befehl == "bw") setzeBW(wert.toInt() != 0);
   else if (befehl == "clip") setzeClip(wert.toInt());
+  else if (befehl == "slideshow") setzeSlideshow(wert.toInt() != 0);
   else Serial.println("Unbekannter Befehl. 'help' fuer Liste.");
 }
 
@@ -559,6 +695,7 @@ void pruefeOSC() {
   treffer |= msg.dispatch("/hopetv/fps", handleOscFps);
   treffer |= msg.dispatch("/hopetv/bw", handleOscBW);
   treffer |= msg.dispatch("/hopetv/clip", handleOscClip);
+  treffer |= msg.dispatch("/hopetv/slideshow", handleOscSlideshow);
 
   // [OK] or [?] directly visible on the debug screen (see zeichneDebugDynamisch)
   letzterOscBefehl = info + (treffer ? " [OK]" : " [?]");
@@ -597,8 +734,10 @@ void zeichneDebugStatisch(const char* titel) {
   tft->println(config.oscPort);
 
   tft->setCursor(4, 56);
-  tft->print("GIFs: ");
-  tft->println(anzahlClips);
+  tft->print("Clips: ");
+  tft->print(anzahlClips);
+  tft->print(" Slides: ");
+  tft->println(anzahlSlides);
 
   tft->setCursor(4, 96);
   tft->println("Letzter OSC:");
@@ -634,7 +773,7 @@ void zeichneDebugDynamisch() {
   }
 }
 
-// Debug level 2: list of all found GIF files, paginated (advances one page
+// Debug level 2: list of all found clip files, paginated (advances one page
 // every 2s if there are more files than fit on the display).
 void zeichneDateiliste() {
   tft->fillScreen(ST77XX_BLACK);
@@ -642,7 +781,7 @@ void zeichneDateiliste() {
   tft->setTextSize(1);
 
   tft->setCursor(4, 4);
-  tft->print("GIFs (");
+  tft->print("Clips (");
   tft->print(anzahlClips);
   tft->println("):");
 
@@ -689,7 +828,7 @@ void zeichneBootSequenz() {
 
   bootZeile(y, "HopeTV Boot..."); y += zeilenhoehe;
 
-  bootZeile(y, "GIFs: " + String(anzahlClips) + " gefunden"); y += zeilenhoehe;
+  bootZeile(y, "Clips: " + String(anzahlClips) + " Slides: " + String(anzahlSlides)); y += zeilenhoehe;
   for (int i = 0; i < anzahlClips; i++) {
     tft->fillRect(0, y, 128, 10, ST77XX_BLACK);
     tft->setCursor(4, y);
@@ -835,7 +974,7 @@ void beendeGif() {
 
 void spieleGifFrame() {
   if (!gifOffen) {
-    if (gif.open(GIF_DATEI.c_str(), GIFOpenFile, GIFCloseFile, GIFReadFile, GIFSeekFile, GIFDraw)) {
+    if (gif.open(aktuellerClipPfad.c_str(), GIFOpenFile, GIFCloseFile, GIFReadFile, GIFSeekFile, GIFDraw)) {
       gifOffen = true;
     } else {
       Serial.println("GIF konnte nicht geoeffnet werden (Datei fehlt?)");
@@ -846,6 +985,83 @@ void spieleGifFrame() {
   if (!gif.playFrame(true, NULL)) {
     gif.close();
     gifOffen = false; // next call reopens it -> infinite loop
+  }
+}
+
+// Draws one decoded MCU block of a JPEG (still or MJPEG frame) to the display.
+int JPEGDraw(JPEGDRAW *pDraw) {
+  if (bwFilter) {
+    int n = pDraw->iWidth * pDraw->iHeight;
+    for (int i = 0; i < n; i++) pDraw->pPixels[i] = wandleFarbe(pDraw->pPixels[i]);
+  }
+  tft->startWrite();
+  tft->setAddrWindow(pDraw->x, pDraw->y, pDraw->iWidth, pDraw->iHeight);
+  tft->writePixels(pDraw->pPixels, pDraw->iWidth * pDraw->iHeight, false, false);
+  tft->endWrite();
+  return 1;
+}
+
+// Decodes and shows a single JPEG still (main clip playlist or slideshow),
+// then holds it on screen - nothing more to do per frame after this.
+void zeigeStandbild(const String &pfad) {
+  File f = LittleFS.open(pfad, "r");
+  if (!f) {
+    Serial.println("Bild konnte nicht geoeffnet werden (Datei fehlt?)");
+    return;
+  }
+  tft->fillScreen(ST77XX_BLACK);
+  if (jpeg->open(f, JPEGDraw)) {
+    jpeg->decode(0, 0, 0);
+    jpeg->close(); // also closes the underlying File
+  } else {
+    f.close();
+  }
+}
+
+void zeigeSlide(int index) {
+  if (anzahlSlides == 0) return;
+  slideIndex = ((index % anzahlSlides) + anzahlSlides) % anzahlSlides;
+  zeigeStandbild(slideListe[slideIndex]);
+  slideStart = millis();
+}
+
+// Reads one frame from the custom .mjpg container (see header comment):
+// [4-byte little-endian length][that many JPEG bytes], repeated.
+bool naechsterMjpgFrame(uint32_t &frameLen) {
+  uint8_t hdr[4];
+  if (mjpgFile.read(hdr, 4) != 4) return false; // clean EOF
+  frameLen = (uint32_t)hdr[0] | ((uint32_t)hdr[1] << 8) |
+             ((uint32_t)hdr[2] << 16) | ((uint32_t)hdr[3] << 24);
+  if (frameLen == 0 || frameLen > sizeof(mjpgFrameBuf)) return false; // corrupt/oversized
+  return mjpgFile.read(mjpgFrameBuf, frameLen) == (int)frameLen;
+}
+
+void beendeMjpeg() {
+  if (mjpgOffen) {
+    mjpgFile.close();
+    mjpgOffen = false;
+  }
+}
+
+void spieleMjpegFrame() {
+  if (!mjpgOffen) {
+    mjpgFile = LittleFS.open(aktuellerClipPfad, "r");
+    if (!mjpgFile) {
+      Serial.println("MJPG konnte nicht geoeffnet werden (Datei fehlt?)");
+      delay(1000); // avoid hammering in a tight loop if the file is missing
+      return;
+    }
+    mjpgOffen = true;
+  }
+  uint32_t frameLen;
+  if (!naechsterMjpgFrame(frameLen)) {
+    mjpgFile.close();
+    mjpgOffen = false; // next call reopens it -> infinite loop
+    return;
+  }
+  if (jpeg->openRAM(mjpgFrameBuf, frameLen, JPEGDraw)) {
+    jpeg->decode(0, 0, 0);
+    jpeg->close();
   }
 }
 
@@ -874,7 +1090,7 @@ void zeichneTestbild() {
   tft->print("HOPE TV TEST");
 }
 
-#define RANDOM_REG32 (*(volatile uint32_t *)0x3FF20E44) // ESP8266 hardware RNG
+// RANDOM_REG32 (ESP8266 hardware RNG) is already provided by the core (esp8266_peri.h)
 
 void zeichneRauschen() {
   // full-screen black/white bit noise + darkened scanlines, like classic
