@@ -30,19 +30,18 @@ re-laid-out, shorter-wire layout; `prototyp` is the original wiring.
 | A0 / DC | D2 (GPIO4) | D3 (GPIO0) | |
 | SDA / MOSI | D7 (GPIO13) | D7 (GPIO13) | Hardware SPI MOSI, fixed on the ESP8266 |
 | SCK | D5 (GPIO14) | D5 (GPIO14) | Hardware SPI SCK, fixed on the ESP8266 |
-| LED / Backlight | D1 (GPIO5) | D1 (GPIO5) | see rewiring note below |
+| LED / Backlight | D1 (GPIO5) | D1 (GPIO5) | PWM-controlled, see Brightness/Power note below |
 
 D0 and D8 are deliberately avoided in both layouts: they have special
 boot-strapping functions and can easily cause boot loops or a dead display.
 
-### Backlight rewiring (required for brightness/power control)
+### Brightness/Power
 
-The backlight LED must be wired to **D1 (GPIO5)**, not straight to 3V3, for
-`/hopetv/brightness` and `/hopetv/power` to have any effect. According to the
+The backlight LED is wired to **D1 (GPIO5)**, not straight to 3V3, so
+`/hopetv/brightness` and `/hopetv/power` can dim/switch it via PWM. Per the
 module's datasheet, the LED pin is a 3.3V logic control input ("high level
-lighting"), not a raw LED — wiring it directly to a GPIO without a transistor
-is fine. Without this rewiring the sketch still runs, but brightness/power
-commands only blank the drawn image, not the actual backlight.
+lighting"), not a raw LED — driving it directly from a GPIO without a
+transistor is fine.
 
 ## Setup
 
@@ -137,12 +136,14 @@ it, each image is shown before auto-advancing to the next, looping forever.
 adjustable with `/hopetv/slideshow/speed <seconds>` (or Serial `slidespeed
 <seconds>`), e.g. `slidespeed 2.5`.
 
-Each transition fades to black, swaps the image, then fades back in (1s
-total) via backlight PWM dimming — needs the backlight rewiring (see
-above), same as `/hopetv/brightness`. This isn't a true pixel crossfade
-between the two images (that would need two full 128x128 framebuffers in
-RAM at once, ~64KB, more than reliably fits alongside WiFi + JPEGDEC), but
-reads as a clean fade transition in practice.
+Optionally, each transition can fade to black, swap the image, then fade
+back in via backlight PWM dimming, same mechanism as `/hopetv/brightness`.
+Off by default; enable/adjust it with `/hopetv/slideshow/fade <ms>` (or
+Serial `slidefade <ms>`), where `<ms>` is the total fade duration (0 turns
+it off again), e.g. `slidefade 1000` for a 1-second fade. This isn't a true
+pixel crossfade between the two images (that would need two full 128x128
+framebuffers in RAM at once, ~64KB, more than reliably fits alongside WiFi +
+JPEGDEC), but reads as a clean fade transition in practice.
 
 ```bash
 ffmpeg -i input.jpg -vf "crop=min(iw\,ih):min(iw\,ih):(iw-min(iw\,ih))/2:(ih-min(iw\,ih))/2,\
@@ -157,12 +158,13 @@ scale=128:128:flags=lanczos" -update 1 -q:v 5 output.jpg
 | `/hopetv/auto` | int (0/1) | auto mode-cycling off/on |
 | `/hopetv/debug` | int (0-2) | 0=off, 1=info screen (IP/port/clip+slide count/last command), 2=file list of found clips (paginated every 2s if needed) |
 | `/hopetv/power` | int (0/1) | display off/on |
-| `/hopetv/brightness` | float (0.0-1.0) | backlight brightness (needs the backlight rewiring above) |
+| `/hopetv/brightness` | float (0.0-1.0) | backlight brightness |
 | `/hopetv/fps` | float (1-60) | frame rate for noise/animation (MJPEG clips run at their own native pace) |
 | `/hopetv/bw` | int (0/1) | black & white filter, applied to test pattern, animation, and all clip/slideshow playback |
 | `/hopetv/clip` | int (index) | select a clip by index (0-based, alphabetical — see Serial `clips`), switches to clip mode |
 | `/hopetv/slideshow` | int (0/1) | slideshow mode off/on (see Slideshow section above) |
 | `/hopetv/slideshow/speed` | float (seconds) | seconds per slideshow image (default 4) |
+| `/hopetv/slideshow/fade` | int (ms) | total fade transition duration; 0 = off (default) |
 
 The address must match exactly (lowercase, one leading slash, no spaces) or
 the message is received but ignored. Every received OSC message is echoed
@@ -176,7 +178,8 @@ sender is easy to spot without a Serial Monitor open.
 The exact same set of commands also works by typing into the Serial Monitor
 (115200 baud, line ending set to "Newline") — just drop the `/hopetv/`
 prefix: `mode 3`, `brightness 0.5`, `clip 1`, `slideshow 1`, `slidespeed
-2.5`, `clips` (lists found clips + slide count), `help` (full command list).
+2.5`, `slidefade 1000`, `clips` (lists found clips + slide count), `help`
+(full command list).
 
 ## Repo layout
 

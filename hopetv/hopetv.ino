@@ -1,7 +1,7 @@
 // D1 mini (ESP8266/ESP-12) + 1.44" SPI TFT 128x128 (ST7735, "v1.1" China clone module)
 //
 // Wiring (Hardware SPI):
-//   LED/Backlight -> see note below (Brightness/Power)
+//   LED/Backlight -> D1 (GPIO5) - PWM-controlled, see Brightness/Power note below
 //   SCK           -> D5 (GPIO14)
 //   SDA/MOSI      -> D7 (GPIO13)
 //   A0/DC         -> D3 (GPIO0)
@@ -10,15 +10,12 @@
 //   VCC           -> 3V3
 //   GND           -> GND
 //
-// Brightness/Power (IMPORTANT):
-//   For real brightness control and a true "off" state, the backlight LED
-//   must NOT be wired directly to 3V3 anymore, but to D1 (GPIO5). According
-//   to the manufacturer datasheet, the LED pin is a logic control input
-//   (3.3V TTL, "high level lighting"), not a raw LED pin - wiring it
-//   directly to D1 without a transistor is fine.
-//   Without this rewiring, /hopetv/brightness and /hopetv/power have no
-//   visible effect on the backlight (only the drawn image itself goes
-//   dark/blank, the backlight itself stays on).
+// Brightness/Power:
+//   The backlight LED is wired to D1 (GPIO5), not straight to 3V3, so
+//   /hopetv/brightness and /hopetv/power can dim/switch it via PWM. Per the
+//   manufacturer datasheet, the LED pin is a logic control input (3.3V TTL,
+//   "high level lighting"), not a raw LED pin - driving it directly from a
+//   GPIO without a transistor is fine.
 //
 // Libraries (install via the Library Manager):
 //   "Adafruit GFX Library"
@@ -71,10 +68,12 @@
 //                                 sorted, see serial "clips"), switches to clip mode
 //   /hopetv/slideshow      int   0/1  slideshow mode off/on (see above)
 //   /hopetv/slideshow/speed float seconds per slideshow image (default 4)
+//   /hopetv/slideshow/fade int   ms   total fade transition duration; 0 = off (default)
 //
 // The same commands also work via the Serial Monitor (115200 baud, line
 // ending "Newline"), no OSC sender needed for testing: e.g. "mode 3",
-// "brightness 0.5", "clip 1", "slidespeed 2.5". "help" shows the full list.
+// "brightness 0.5", "clip 1", "slidespeed 2.5", "slidefade 1000".
+// "help" shows the full list.
 // IMPORTANT: serial commands need NO "/hopetv/" prefix (just "mode 3"), but
 // real OSC messages DO (full "/hopetv/mode 3", exact, lowercase, one leading
 // slash) - otherwise the message is received/displayed but no action is
@@ -147,6 +146,7 @@ int anzahlSlides = 0;
 int slideIndex = 0;
 unsigned long slideStart = 0;
 unsigned long slideDauerMs = 4000; // per image, adjustable via /hopetv/slideshow/speed
+unsigned long slideFadeMs = 0; // total fade transition duration; 0 = off (default), see /hopetv/slideshow/fade
 
 // Mode name kept as "GIFMODUS" for historical reasons (this used to be
 // GIF-only) - it's now the general clip-playlist mode (MJPEG + stills).
@@ -578,6 +578,10 @@ void setzeSlideSpeed(float sekunden) {
   slideDauerMs = (unsigned long)(sekunden * 1000.0f);
 }
 
+void setzeSlideFade(int ms) {
+  slideFadeMs = (unsigned long)constrain(ms, 0, 10000); // 0 = off
+}
+
 // OSC handlers: thin wrappers around the core functions above
 
 void handleOscMode(OSCMessage &msg) {
@@ -630,6 +634,11 @@ void handleOscSlideshowSpeed(OSCMessage &msg) {
   setzeSlideSpeed(msg.getFloat(0));
 }
 
+void handleOscSlideshowFade(OSCMessage &msg) {
+  bootSplashActive = false;
+  setzeSlideFade(msg.getInt(0));
+}
+
 // Serial test commands, e.g. "mode 3", "brightness 0.5", "clip 1" - "help" for the list.
 // Set the Serial Monitor's line ending to "Newline".
 void pruefeSerialBefehle() {
@@ -649,7 +658,7 @@ void pruefeSerialBefehle() {
     Serial.println("Befehle: mode <0-3> | auto <0/1> | debug <0-2> | power <0/1> |");
     Serial.println("         brightness <0.0-1.0> | fps <1-60> | bw <0/1> |");
     Serial.println("         clip <index> | clips (Liste der gefundenen Clips) |");
-    Serial.println("         slideshow <0/1> | slidespeed <seconds>");
+    Serial.println("         slideshow <0/1> | slidespeed <seconds> | slidefade <ms>");
     Serial.println("debug: 0=aus 1=Info 2=Dateiliste");
     return;
   }
@@ -673,7 +682,7 @@ void pruefeSerialBefehle() {
   bool bekannt = (befehl == "mode" || befehl == "auto" || befehl == "debug" ||
                   befehl == "power" || befehl == "brightness" || befehl == "fps" ||
                   befehl == "bw" || befehl == "clip" || befehl == "slideshow" ||
-                  befehl == "slidespeed");
+                  befehl == "slidespeed" || befehl == "slidefade");
   letzterOscBefehl = "serial:" + zeile + (bekannt ? " [OK]" : " [?]");
 
   if (befehl == "mode") setzeModus(wert.toInt());
@@ -686,6 +695,7 @@ void pruefeSerialBefehle() {
   else if (befehl == "clip") setzeClip(wert.toInt());
   else if (befehl == "slideshow") setzeSlideshow(wert.toInt() != 0);
   else if (befehl == "slidespeed") setzeSlideSpeed(wert.toFloat());
+  else if (befehl == "slidefade") setzeSlideFade(wert.toInt());
   else Serial.println("Unbekannter Befehl. 'help' fuer Liste.");
 }
 
@@ -723,6 +733,7 @@ void pruefeOSC() {
   treffer |= msg.dispatch("/hopetv/bw", handleOscBW);
   treffer |= msg.dispatch("/hopetv/clip", handleOscClip);
   treffer |= msg.dispatch("/hopetv/slideshow/speed", handleOscSlideshowSpeed);
+  treffer |= msg.dispatch("/hopetv/slideshow/fade", handleOscSlideshowFade);
   treffer |= msg.dispatch("/hopetv/slideshow", handleOscSlideshow);
 
   // [OK] or [?] directly visible on the debug screen (see zeichneDebugDynamisch)
@@ -933,28 +944,33 @@ void zeigeStandbild(const String &pfad) {
   }
 }
 
-const int SLIDE_FADE_SCHRITTE = 10;
-const int SLIDE_FADE_SCHRITT_MS = 50; // 10 * 50ms = 500ms je Richtung = 1s gesamt
+const unsigned long SLIDE_FADE_SCHRITT_MS = 25; // fixed step size; step COUNT scales with slideFadeMs
 
 void zeigeSlide(int index) {
   if (anzahlSlides == 0) return;
   slideIndex = ((index % anzahlSlides) + anzahlSlides) % anzahlSlides;
 
-  // 1s transition via backlight dimming (fade to black, swap image, fade
-  // back in) - needs the backlight rewired to D1 (see README), same as
-  // /hopetv/brightness. A true pixel crossfade would need two full 128x128
-  // framebuffers (~64KB) held in RAM at once, more than reliably fits
-  // alongside WiFi + JPEGDEC on the ESP8266.
-  for (int i = SLIDE_FADE_SCHRITTE; i >= 0; i--) {
-    setzeHelligkeit(brightness * i / SLIDE_FADE_SCHRITTE);
-    delay(SLIDE_FADE_SCHRITT_MS);
+  // Off by default (slideFadeMs == 0): swaps instantly. When enabled via
+  // /hopetv/slideshow/fade, transitions via backlight dimming (fade to
+  // black, swap image, fade back in) over slideFadeMs total. A true pixel
+  // crossfade would need two full 128x128 framebuffers (~64KB) held in RAM
+  // at once, more than reliably fits alongside WiFi + JPEGDEC on the ESP8266.
+  if (slideFadeMs > 0) {
+    int schritte = max(1, (int)(slideFadeMs / 2 / SLIDE_FADE_SCHRITT_MS));
+    for (int i = schritte; i >= 0; i--) {
+      setzeHelligkeit(brightness * i / schritte);
+      delay(SLIDE_FADE_SCHRITT_MS);
+    }
   }
 
   zeigeStandbild(slideListe[slideIndex]);
 
-  for (int i = 0; i <= SLIDE_FADE_SCHRITTE; i++) {
-    setzeHelligkeit(brightness * i / SLIDE_FADE_SCHRITTE);
-    delay(SLIDE_FADE_SCHRITT_MS);
+  if (slideFadeMs > 0) {
+    int schritte = max(1, (int)(slideFadeMs / 2 / SLIDE_FADE_SCHRITT_MS));
+    for (int i = 0; i <= schritte; i++) {
+      setzeHelligkeit(brightness * i / schritte);
+      delay(SLIDE_FADE_SCHRITT_MS);
+    }
   }
 
   slideStart = millis();
