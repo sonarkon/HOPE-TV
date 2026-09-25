@@ -175,7 +175,7 @@ String letzterOscBefehl = "-";
 
 bool bootSplashActive = true;
 unsigned long bootSplashStart = 0;
-const unsigned long BOOT_SPLASH_DAUER = 10000; // 10s IP display after boot
+const unsigned long BOOT_SPLASH_DAUER = 3000; // IP/status display time after WiFi result, before clip playback starts
 unsigned long wlanStartZeit = 0; // set by starteWLAN(), used to cap the total connect wait
 
 // State for the ball animation
@@ -202,6 +202,8 @@ void setup() {
   setzeHelligkeit(brightness);
 
   jpeg = new JPEGDEC();
+
+  Serial.println("Standard-Clip: " + aktuellerClipPfad + " (Typ: " + String(aktuellerClipTyp == CLIP_MJPG ? "MJPG" : "STILL") + ")");
 
   // Fire off the WiFi connection now (non-blocking) so it happens in the
   // background while the boot sequence below draws the clip list etc. -
@@ -937,9 +939,13 @@ void zeigeStandbild(const String &pfad) {
   }
   tft->fillScreen(ST77XX_BLACK);
   if (jpeg->open(f, JPEGDraw)) {
-    jpeg->decode(0, 0, 0);
+    Serial.println("JPEG " + pfad + ": " + String(jpeg->getWidth()) + "x" + String(jpeg->getHeight()));
+    if (!jpeg->decode(0, 0, 0)) {
+      Serial.println("JPEG decode fehlgeschlagen (" + pfad + "), Fehlercode: " + String(jpeg->getLastError()));
+    }
     jpeg->close(); // also closes the underlying File
   } else {
+    Serial.println("JPEG open fehlgeschlagen (" + pfad + "), Fehlercode: " + String(jpeg->getLastError()));
     f.close();
   }
 }
@@ -1011,8 +1017,12 @@ void spieleMjpegFrame() {
     return;
   }
   if (jpeg->openRAM(mjpgFrameBuf, frameLen, JPEGDraw)) {
-    jpeg->decode(0, 0, 0);
+    if (!jpeg->decode(0, 0, 0)) {
+      Serial.println("MJPG-Frame decode fehlgeschlagen (" + aktuellerClipPfad + "), Fehlercode: " + String(jpeg->getLastError()));
+    }
     jpeg->close();
+  } else {
+    Serial.println("MJPG-Frame open fehlgeschlagen (" + aktuellerClipPfad + "), Fehlercode: " + String(jpeg->getLastError()) + ", Framelaenge: " + String(frameLen));
   }
 }
 

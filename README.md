@@ -118,9 +118,20 @@ source video/GIF — check for letterboxing/aspect ratio first):
 
 ```bash
 ffmpeg -i input.mov -vf "crop=<w>:<h>:<x>:<y>,scale=128:128:flags=lanczos,fps=12" \
-  -c:v mjpeg -q:v 10 -an -f mjpeg raw.mjpeg
+  -c:v mjpeg -huffman default -pix_fmt yuvj420p -q:v 10 -an -f mjpeg raw.mjpeg
 python3 tools/frame_mjpeg.py raw.mjpeg clipN.mjpg
 ```
+
+**`-huffman default -pix_fmt yuvj420p` are required, not optional.** FFmpeg's
+mjpeg encoder defaults to per-frame-optimized ("optimal") Huffman tables and
+a non-canonical chroma subsampling layout; both are valid JPEG but JPEGDEC
+(the decoder this firmware uses) fails to decode the vast majority of frames
+encoded that way — the exact symptom is clips/stills that look glitchy
+(color noise, torn/shifted rows, wrong colors) on the device, verified by
+running every frame of an affected clip through JPEGDEC's own reference
+decoder offline. `-huffman default` forces the standard JPEG Huffman tables
+and `-pix_fmt yuvj420p` forces canonical 4:2:0 subsampling — together these
+reliably produce frames JPEGDEC decodes correctly.
 
 Keep clips short (a few seconds) — file size scales with length; `q:v 10`
 at 12fps runs well under 100KB for a several-second clip. LittleFS space is
@@ -147,8 +158,11 @@ JPEGDEC), but reads as a clean fade transition in practice.
 
 ```bash
 ffmpeg -i input.jpg -vf "crop=min(iw\,ih):min(iw\,ih):(iw-min(iw\,ih))/2:(ih-min(iw\,ih))/2,\
-scale=128:128:flags=lanczos" -update 1 -q:v 5 output.jpg
+scale=128:128:flags=lanczos" -huffman default -pix_fmt yuvj420p -update 1 -q:v 5 output.jpg
 ```
+
+Same `-huffman default -pix_fmt yuvj420p` requirement as clips above (see
+note there) — without it, stills decode just as unreliably as clips do.
 
 ## OSC commands (default port 9000)
 
