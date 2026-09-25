@@ -933,10 +933,30 @@ void zeigeStandbild(const String &pfad) {
   }
 }
 
+const int SLIDE_FADE_SCHRITTE = 10;
+const int SLIDE_FADE_SCHRITT_MS = 50; // 10 * 50ms = 500ms je Richtung = 1s gesamt
+
 void zeigeSlide(int index) {
   if (anzahlSlides == 0) return;
   slideIndex = ((index % anzahlSlides) + anzahlSlides) % anzahlSlides;
+
+  // 1s transition via backlight dimming (fade to black, swap image, fade
+  // back in) - needs the backlight rewired to D1 (see README), same as
+  // /hopetv/brightness. A true pixel crossfade would need two full 128x128
+  // framebuffers (~64KB) held in RAM at once, more than reliably fits
+  // alongside WiFi + JPEGDEC on the ESP8266.
+  for (int i = SLIDE_FADE_SCHRITTE; i >= 0; i--) {
+    setzeHelligkeit(brightness * i / SLIDE_FADE_SCHRITTE);
+    delay(SLIDE_FADE_SCHRITT_MS);
+  }
+
   zeigeStandbild(slideListe[slideIndex]);
+
+  for (int i = 0; i <= SLIDE_FADE_SCHRITTE; i++) {
+    setzeHelligkeit(brightness * i / SLIDE_FADE_SCHRITTE);
+    delay(SLIDE_FADE_SCHRITT_MS);
+  }
+
   slideStart = millis();
 }
 

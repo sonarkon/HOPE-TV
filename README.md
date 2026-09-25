@@ -137,6 +137,13 @@ it, each image is shown before auto-advancing to the next, looping forever.
 adjustable with `/hopetv/slideshow/speed <seconds>` (or Serial `slidespeed
 <seconds>`), e.g. `slidespeed 2.5`.
 
+Each transition fades to black, swaps the image, then fades back in (1s
+total) via backlight PWM dimming — needs the backlight rewiring (see
+above), same as `/hopetv/brightness`. This isn't a true pixel crossfade
+between the two images (that would need two full 128x128 framebuffers in
+RAM at once, ~64KB, more than reliably fits alongside WiFi + JPEGDEC), but
+reads as a clean fade transition in practice.
+
 ```bash
 ffmpeg -i input.jpg -vf "crop=min(iw\,ih):min(iw\,ih):(iw-min(iw\,ih))/2:(ih-min(iw\,ih))/2,\
 scale=128:128:flags=lanczos" -update 1 -q:v 5 output.jpg
