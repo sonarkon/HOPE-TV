@@ -24,19 +24,23 @@
 //   "Adafruit GFX Library"
 //   "Adafruit ST7735 and ST7789 Library" (version with enableDisplay()!)
 //   "OSC" (by CNMAT / Adrian Freed)
-//   "AnimatedGIF" (by bitbank2)
 //   "JPEGDEC" (by bitbank2)
 // LittleFS, ESP8266WiFi, WiFiUdp are part of the ESP8266 board package.
 //
-// Clip files: drop any number of .gif / .mjpg / .jpg(.jpeg) files (128x128)
-// into the /data folder and upload them with the "ESP8266 LittleFS Data
-// Upload" plugin - they are auto-detected at boot (sorted alphabetically,
+// Clip files: drop any number of .mjpg / .jpg(.jpeg) files (128x128) into
+// the /data folder and upload them with the "ESP8266 LittleFS Data Upload"
+// plugin - they are auto-detected at boot (sorted alphabetically,
 // addressable via index 0,1,2,..., see the serial command "clips"), and each
-// plays with the decoder matching its extension: .gif via AnimatedGIF,
-// .mjpg via a small custom Motion-JPEG player (see below), a lone .jpg/.jpeg
-// is treated as a still image and just held on screen. Default behavior: the
-// device boots straight into clip mode and loops clip2.gif if present,
-// otherwise the first file found (no auto-cycling through all modes).
+// plays with the decoder matching its extension: .mjpg via a small custom
+// Motion-JPEG player (see below), a lone .jpg/.jpeg is treated as a still
+// image and just held on screen. (No animated-GIF support: it was dropped
+// deliberately - the AnimatedGIF library's own global decode-state object
+// alone used ~24KB, which combined with JPEGDEC left no RAM headroom on the
+// ESP8266's small 80KB region for global/static variables. Re-encode old
+// .gif clips to .mjpg with tools/frame_mjpeg.py instead - typically smaller
+// files too.) Default behavior: the device boots straight into clip mode
+// and loops clip2.mjpg if present, otherwise the first file found (no
+// auto-cycling through all modes).
 //
 // .mjpg format: NOT a standard container - a simple custom format made for
 // this project (see ../tools/frame_mjpeg.py in the repo root): repeated
@@ -48,27 +52,29 @@
 // then run `python3 tools/frame_mjpeg.py raw.mjpeg output.mjpg`.
 //
 // Slideshow: separate, dedicated mode - put .jpg/.jpeg stills into
-// /data/slideshow/ and upload them; they auto-advance every 4 seconds,
-// looping forever, independent of the main clip playlist above.
+// /data/slideshow/ and upload them; they auto-advance every N seconds
+// (default 4, see /hopetv/slideshow/speed), looping forever, independent
+// of the main clip playlist above.
 //
 // Optional: /data/config.txt for SSID/password/OSC port without reflashing.
 //
 // OSC commands (port from config.txt / default 9000):
-//   /hopetv/mode        int   0=Test pattern 1=Noise 2=Animation 3=Clip
-//   /hopetv/auto        int   0/1  auto mode-cycling off/on
-//   /hopetv/debug       int   0=off 1=info (IP/port/clip+slide count/last command)
-//                              2=file list (found clips, paginated every 2s)
-//   /hopetv/power       int   0/1  display off/on
-//   /hopetv/brightness  float 0.0-1.0  backlight brightness (see note above)
-//   /hopetv/fps         float 1-60  frame rate for noise/animation
-//   /hopetv/bw          int   0/1  black & white filter off/on
-//   /hopetv/clip        int   index  select a clip by index (0-based, alphabetically
-//                              sorted, see serial "clips"), switches to clip mode
-//   /hopetv/slideshow   int   0/1  slideshow mode off/on (see above)
+//   /hopetv/mode           int   0=Test pattern 1=Noise 2=Animation 3=Clip
+//   /hopetv/auto           int   0/1  auto mode-cycling off/on
+//   /hopetv/debug          int   0=off 1=info (IP/port/clip+slide count/last command)
+//                                 2=file list (found clips, paginated every 2s)
+//   /hopetv/power          int   0/1  display off/on
+//   /hopetv/brightness     float 0.0-1.0  backlight brightness (see note above)
+//   /hopetv/fps            float 1-60  frame rate for noise/animation
+//   /hopetv/bw             int   0/1  black & white filter off/on
+//   /hopetv/clip           int   index  select a clip by index (0-based, alphabetically
+//                                 sorted, see serial "clips"), switches to clip mode
+//   /hopetv/slideshow      int   0/1  slideshow mode off/on (see above)
+//   /hopetv/slideshow/speed float seconds per slideshow image (default 4)
 //
 // The same commands also work via the Serial Monitor (115200 baud, line
 // ending "Newline"), no OSC sender needed for testing: e.g. "mode 3",
-// "brightness 0.5", "clip 1", "clips" (list files). "help" shows the full list.
+// "brightness 0.5", "clip 1", "slidespeed 2.5". "help" shows the full list.
 // IMPORTANT: serial commands need NO "/hopetv/" prefix (just "mode 3"), but
 // real OSC messages DO (full "/hopetv/mode 3", exact, lowercase, one leading
 // slash) - otherwise the message is received/displayed but no action is
@@ -82,7 +88,6 @@
 #include <WiFiUdp.h>
 #include <LittleFS.h>
 #include <OSCMessage.h>
-#include <AnimatedGIF.h>
 #include <JPEGDEC.h>
 
 Adafruit_ST7735 *tft;
@@ -115,23 +120,19 @@ void waehlePinout() {
 
 WiFiUDP udp;
 
-AnimatedGIF gif;
-File gifFile;
-bool gifOffen = false;
-
 // Allocated on the heap in setup(), not a global object: JPEGDEC's internal
 // decode buffers/Huffman tables are ~18KB, which alone would overflow the
 // ESP8266's small (80KB) fixed region for global/static variables.
 JPEGDEC *jpeg;
 
-enum ClipTyp { CLIP_GIF, CLIP_MJPG, CLIP_STILL };
+enum ClipTyp { CLIP_MJPG, CLIP_STILL };
 
 #define MAX_CLIPS 16
 String clipListe[MAX_CLIPS];
 ClipTyp clipTypListe[MAX_CLIPS];
 int anzahlClips = 0;
-String aktuellerClipPfad = "/clip2.gif"; // may be overridden by sucheClips()/waehleStandardClip()
-ClipTyp aktuellerClipTyp = CLIP_GIF;
+String aktuellerClipPfad = "/01_clip2.mjpg"; // may be overridden by sucheClips()/waehleStandardClip()
+ClipTyp aktuellerClipTyp = CLIP_MJPG;
 
 // Motion-JPEG playback (custom .mjpg container, see header comment above)
 File mjpgFile;
@@ -145,10 +146,12 @@ String slideListe[MAX_SLIDES];
 int anzahlSlides = 0;
 int slideIndex = 0;
 unsigned long slideStart = 0;
-const unsigned long SLIDE_DAUER = 4000; // 4s per image
+unsigned long slideDauerMs = 4000; // per image, adjustable via /hopetv/slideshow/speed
 
+// Mode name kept as "GIFMODUS" for historical reasons (this used to be
+// GIF-only) - it's now the general clip-playlist mode (MJPEG + stills).
 enum Mode { TESTBILD, RAUSCHEN, ANIMATION, GIFMODUS, SLIDESHOW, DEBUG };
-Mode mode = GIFMODUS; // default: loop clip2.gif directly, no auto-cycling
+Mode mode = GIFMODUS; // default: loop the default clip directly, no auto-cycling
 bool autoCycle = false;
 bool powerOn = true;
 bool bwFilter = false;
@@ -173,6 +176,7 @@ String letzterOscBefehl = "-";
 bool bootSplashActive = true;
 unsigned long bootSplashStart = 0;
 const unsigned long BOOT_SPLASH_DAUER = 10000; // 10s IP display after boot
+unsigned long wlanStartZeit = 0; // set by starteWLAN(), used to cap the total connect wait
 
 // State for the ball animation
 float ballX = 64, ballY = 64;
@@ -197,8 +201,13 @@ void setup() {
   analogWriteRange(1023);
   setzeHelligkeit(brightness);
 
-  gif.begin(LITTLE_ENDIAN_PIXELS);
   jpeg = new JPEGDEC();
+
+  // Fire off the WiFi connection now (non-blocking) so it happens in the
+  // background while the boot sequence below draws the clip list etc. -
+  // by the time we get to actually waiting for it, some/all of the connect
+  // time has likely already elapsed.
+  starteWLAN();
 
   bootSplashActive = true;
   bootSplashStart = millis();
@@ -222,7 +231,7 @@ void loop() {
   if (!powerOn) return;
 
   if (mode == SLIDESHOW) {
-    if (millis() - slideStart > SLIDE_DAUER) {
+    if (millis() - slideStart > slideDauerMs) {
       zeigeSlide(slideIndex + 1);
     }
     return;
@@ -245,7 +254,7 @@ void loop() {
 
   if (autoCycle && millis() - modeStart > MODE_DAUER) {
     modeStart = millis();
-    if (mode == GIFMODUS) { beendeGif(); beendeMjpeg(); }
+    if (mode == GIFMODUS) beendeMjpeg();
     mode = (Mode)((mode + 1) % 4); // cycles TESTBILD/RAUSCHEN/ANIMATION/GIFMODUS
     tft->fillScreen(ST77XX_BLACK);
     if (mode == TESTBILD) zeichneTestbild();
@@ -258,8 +267,6 @@ void loop() {
         lastFrame = millis();
         spieleMjpegFrame();
       }
-    } else if (aktuellerClipTyp == CLIP_GIF) {
-      spieleGifFrame(); // times itself via the GIF's own frame delays
     }
     // CLIP_STILL: nothing to do each frame, already drawn once on selection
   } else if (millis() - lastFrame >= frameIntervalMs) {
@@ -309,9 +316,9 @@ void ladeConfig() {
   Serial.println("config.txt geladen");
 }
 
-// Recognizes .gif, .mjpg (custom container, see header) and .jpg/.jpeg
-// (single still image) - anything else in the root folder is ignored, so
-// e.g. config.txt or the slideshow/ subfolder are naturally skipped.
+// Recognizes .mjpg (custom container, see header) and .jpg/.jpeg (single
+// still image) - anything else in the root folder is ignored, so e.g.
+// config.txt or the slideshow/ subfolder are naturally skipped.
 void sucheClips() {
   anzahlClips = 0;
   Dir dir = LittleFS.openDir("/");
@@ -320,8 +327,7 @@ void sucheClips() {
     String nameLower = name;
     nameLower.toLowerCase();
     ClipTyp typ;
-    if (nameLower.endsWith(".gif")) typ = CLIP_GIF;
-    else if (nameLower.endsWith(".mjpg")) typ = CLIP_MJPG;
+    if (nameLower.endsWith(".mjpg")) typ = CLIP_MJPG;
     else if (nameLower.endsWith(".jpg") || nameLower.endsWith(".jpeg")) typ = CLIP_STILL;
     else continue;
     if (!name.startsWith("/")) name = "/" + name;
@@ -382,7 +388,7 @@ void sucheSlideshow() {
 
 void waehleStandardClip() {
   for (int i = 0; i < anzahlClips; i++) {
-    if (clipListe[i] == "/clip2.gif" || clipListe[i] == "/01_clip2.gif") {
+    if (clipListe[i] == "/01_clip2.mjpg" || clipListe[i] == "/clip2.mjpg") {
       aktuellerClipPfad = clipListe[i];
       aktuellerClipTyp = clipTypListe[i];
       return;
@@ -394,17 +400,27 @@ void waehleStandardClip() {
   }
 }
 
-void verbindeWLAN(int y) {
+// Starts the WiFi connection attempt and returns immediately - WiFi.begin()
+// itself is non-blocking, the ESP8266 connects in the background. Call
+// zeigeWLANStatus() later to wait for/show the result.
+void starteWLAN() {
+  wlanStartZeit = millis();
   WiFi.mode(WIFI_STA);
   WiFi.begin(config.ssid.c_str(), config.password.c_str());
   Serial.print("Verbinde mit ");
   Serial.println(config.ssid);
+}
 
+// Waits for (and shows) the outcome of the WiFi connection started earlier
+// by starteWLAN(). The 15s timeout is measured from wlanStartZeit, not from
+// here - if other boot steps already used up several seconds in the
+// meantime, only the remaining time is waited (often zero: already connected).
+void zeigeWLANStatus(int y) {
   const char* punkte[3] = {".  ", ".. ", "..."};
   int punktIndex = 0;
+  const unsigned long GESAMT_TIMEOUT = 15000;
 
-  unsigned long start = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - start < 15000) {
+  while (WiFi.status() != WL_CONNECTED && millis() - wlanStartZeit < GESAMT_TIMEOUT) {
     delay(300);
     Serial.print(".");
 
@@ -448,7 +464,7 @@ void setzeHelligkeit(float b) {
 // Core functions: shared by both OSC handlers AND serial test commands
 
 void setzeModus(int m) {
-  if (mode == GIFMODUS) { beendeGif(); beendeMjpeg(); }
+  if (mode == GIFMODUS) beendeMjpeg();
   mode = (Mode)constrain(m, 0, 3);
   autoCycle = false;
   tft->fillScreen(ST77XX_BLACK);
@@ -474,7 +490,7 @@ void setzeDebugModus(int stufe) {
   debugModus = neueStufe;
 
   if (debugModus > 0) {
-    if (mode == GIFMODUS) { beendeGif(); beendeMjpeg(); }
+    if (mode == GIFMODUS) beendeMjpeg();
     mode = DEBUG;
     autoCycle = false;
     filelistSeite = 0;
@@ -531,8 +547,7 @@ void setzeClip(int index) {
   index = constrain(index, 0, anzahlClips - 1);
   aktuellerClipPfad = clipListe[index];
   aktuellerClipTyp = clipTypListe[index];
-  beendeGif();   // closes whichever was open - the next frame opens the new clip
-  beendeMjpeg();
+  beendeMjpeg(); // closes whichever was open - the next frame opens the new clip
   mode = GIFMODUS;
   autoCycle = false;
   modeStart = millis();
@@ -545,7 +560,7 @@ void setzeSlideshow(bool an) {
       Serial.println("Keine Slideshow-Bilder gefunden (data/slideshow/ hochgeladen?)");
       return;
     }
-    if (mode == GIFMODUS) { beendeGif(); beendeMjpeg(); }
+    if (mode == GIFMODUS) beendeMjpeg();
     mode = SLIDESHOW;
     autoCycle = false;
     zeigeSlide(0);
@@ -556,6 +571,11 @@ void setzeSlideshow(bool an) {
     if (aktuellerClipTyp == CLIP_STILL) zeigeStandbild(aktuellerClipPfad);
     modeStart = millis();
   }
+}
+
+void setzeSlideSpeed(float sekunden) {
+  sekunden = constrain(sekunden, 0.5f, 600.0f);
+  slideDauerMs = (unsigned long)(sekunden * 1000.0f);
 }
 
 // OSC handlers: thin wrappers around the core functions above
@@ -605,6 +625,11 @@ void handleOscSlideshow(OSCMessage &msg) {
   setzeSlideshow(msg.getInt(0) != 0);
 }
 
+void handleOscSlideshowSpeed(OSCMessage &msg) {
+  bootSplashActive = false;
+  setzeSlideSpeed(msg.getFloat(0));
+}
+
 // Serial test commands, e.g. "mode 3", "brightness 0.5", "clip 1" - "help" for the list.
 // Set the Serial Monitor's line ending to "Newline".
 void pruefeSerialBefehle() {
@@ -624,7 +649,7 @@ void pruefeSerialBefehle() {
     Serial.println("Befehle: mode <0-3> | auto <0/1> | debug <0-2> | power <0/1> |");
     Serial.println("         brightness <0.0-1.0> | fps <1-60> | bw <0/1> |");
     Serial.println("         clip <index> | clips (Liste der gefundenen Clips) |");
-    Serial.println("         slideshow <0/1>");
+    Serial.println("         slideshow <0/1> | slidespeed <seconds>");
     Serial.println("debug: 0=aus 1=Info 2=Dateiliste");
     return;
   }
@@ -647,7 +672,8 @@ void pruefeSerialBefehle() {
 
   bool bekannt = (befehl == "mode" || befehl == "auto" || befehl == "debug" ||
                   befehl == "power" || befehl == "brightness" || befehl == "fps" ||
-                  befehl == "bw" || befehl == "clip" || befehl == "slideshow");
+                  befehl == "bw" || befehl == "clip" || befehl == "slideshow" ||
+                  befehl == "slidespeed");
   letzterOscBefehl = "serial:" + zeile + (bekannt ? " [OK]" : " [?]");
 
   if (befehl == "mode") setzeModus(wert.toInt());
@@ -659,6 +685,7 @@ void pruefeSerialBefehle() {
   else if (befehl == "bw") setzeBW(wert.toInt() != 0);
   else if (befehl == "clip") setzeClip(wert.toInt());
   else if (befehl == "slideshow") setzeSlideshow(wert.toInt() != 0);
+  else if (befehl == "slidespeed") setzeSlideSpeed(wert.toFloat());
   else Serial.println("Unbekannter Befehl. 'help' fuer Liste.");
 }
 
@@ -695,6 +722,7 @@ void pruefeOSC() {
   treffer |= msg.dispatch("/hopetv/fps", handleOscFps);
   treffer |= msg.dispatch("/hopetv/bw", handleOscBW);
   treffer |= msg.dispatch("/hopetv/clip", handleOscClip);
+  treffer |= msg.dispatch("/hopetv/slideshow/speed", handleOscSlideshowSpeed);
   treffer |= msg.dispatch("/hopetv/slideshow", handleOscSlideshow);
 
   // [OK] or [?] directly visible on the debug screen (see zeichneDebugDynamisch)
@@ -829,16 +857,24 @@ void zeichneBootSequenz() {
   bootZeile(y, "HopeTV Boot..."); y += zeilenhoehe;
 
   bootZeile(y, "Clips: " + String(anzahlClips) + " Slides: " + String(anzahlSlides)); y += zeilenhoehe;
+
+  // List each clip name, but cap the TOTAL time spent here at 5s regardless
+  // of how many clips there are (was a flat 1s/clip before - with a dozen+
+  // clips that alone delayed the WLAN status past its own point of being useful).
+  unsigned long proClipMs = (anzahlClips > 0) ? max(150UL, 5000UL / (unsigned long)anzahlClips) : 0;
   for (int i = 0; i < anzahlClips; i++) {
     tft->fillRect(0, y, 128, 10, ST77XX_BLACK);
     tft->setCursor(4, y);
     tft->println(clipListe[i]);
-    delay(1000);
+    delay(proClipMs);
   }
   y += zeilenhoehe;
   bootZeile(y, "SSID: " + config.ssid); y += zeilenhoehe;
 
-  verbindeWLAN(y); y += zeilenhoehe;
+  // WiFi was already started in setup() (starteWLAN()) and has been
+  // connecting in the background this whole time - this just waits for
+  // (and shows) whatever's left of the 15s budget, often nothing at all.
+  zeigeWLANStatus(y); y += zeilenhoehe;
   bootSplashStart = millis(); // the full display time only starts counting from here
 
   if (WiFi.status() == WL_CONNECTED) {
@@ -865,127 +901,6 @@ uint16_t wandleFarbe(uint16_t farbe) {
   // is very slow) - fixed-point weights 77/150/29 (sum 256) instead of 0.299/0.587/0.114
   uint8_t y = (uint8_t)((77u * r8 + 150u * g8 + 29u * b8) >> 8);
   return tft->color565(y, y, y);
-}
-
-void *GIFOpenFile(const char *fname, int32_t *pSize) {
-  gifFile = LittleFS.open(fname, "r");
-  if (gifFile) {
-    *pSize = gifFile.size();
-    return (void *)&gifFile;
-  }
-  return NULL;
-}
-
-void GIFCloseFile(void *pHandle) {
-  File *f = static_cast<File *>(pHandle);
-  if (f != NULL) f->close();
-}
-
-int32_t GIFReadFile(GIFFILE *pFile, uint8_t *pBuf, int32_t iLen) {
-  int32_t iBytesRead = iLen;
-  File *f = static_cast<File *>(pFile->fHandle);
-  if ((pFile->iSize - pFile->iPos) < iLen)
-    iBytesRead = pFile->iSize - pFile->iPos - 1; // as in the library's own example
-  if (iBytesRead <= 0) return 0;
-  iBytesRead = (int32_t)f->read(pBuf, iBytesRead);
-  pFile->iPos = f->position();
-  return iBytesRead;
-}
-
-int32_t GIFSeekFile(GIFFILE *pFile, int32_t iPosition) {
-  File *f = static_cast<File *>(pFile->fHandle);
-  f->seek(iPosition);
-  pFile->iPos = (int32_t)f->position();
-  return pFile->iPos;
-}
-
-// Draws one image row of the GIF directly to the display (RAM-friendly)
-void GIFDraw(GIFDRAW *pDraw) {
-  uint8_t *s;
-  uint16_t *d, *usPalette, usTemp[128];
-  int x, y, iWidth;
-
-  iWidth = pDraw->iWidth;
-  if (iWidth + pDraw->iX > 128) iWidth = 128 - pDraw->iX;
-  usPalette = pDraw->pPalette;
-  y = pDraw->iY + pDraw->y;
-  if (y >= 128 || pDraw->iX >= 128 || iWidth < 1) return;
-  s = pDraw->pPixels;
-  if (pDraw->ucDisposalMethod == 2) { // reset to background color
-    for (x = 0; x < iWidth; x++) {
-      if (s[x] == pDraw->ucTransparent) s[x] = pDraw->ucBackground;
-    }
-    pDraw->ucHasTransparency = 0;
-  }
-
-  if (pDraw->ucHasTransparency) {
-    uint8_t *pEnd, c, ucTransparent = pDraw->ucTransparent;
-    int iCount;
-    pEnd = s + iWidth;
-    x = 0;
-    iCount = 0;
-    while (x < iWidth) {
-      c = ucTransparent - 1;
-      d = usTemp;
-      while (c != ucTransparent && s < pEnd) {
-        c = *s++;
-        if (c == ucTransparent) {
-          s--;
-        } else {
-          *d++ = wandleFarbe(usPalette[c]);
-          iCount++;
-        }
-      }
-      if (iCount) {
-        tft->startWrite();
-        tft->setAddrWindow(pDraw->iX + x, y, iCount, 1);
-        tft->writePixels(usTemp, iCount, false, false);
-        tft->endWrite();
-        x += iCount;
-        iCount = 0;
-      }
-      c = ucTransparent;
-      while (c == ucTransparent && s < pEnd) {
-        c = *s++;
-        if (c == ucTransparent) iCount++;
-        else s--;
-      }
-      if (iCount) {
-        x += iCount;
-        iCount = 0;
-      }
-    }
-  } else {
-    s = pDraw->pPixels;
-    for (x = 0; x < iWidth; x++) usTemp[x] = wandleFarbe(usPalette[*s++]);
-    tft->startWrite();
-    tft->setAddrWindow(pDraw->iX, y, iWidth, 1);
-    tft->writePixels(usTemp, iWidth, false, false);
-    tft->endWrite();
-  }
-}
-
-void beendeGif() {
-  if (gifOffen) {
-    gif.close();
-    gifOffen = false;
-  }
-}
-
-void spieleGifFrame() {
-  if (!gifOffen) {
-    if (gif.open(aktuellerClipPfad.c_str(), GIFOpenFile, GIFCloseFile, GIFReadFile, GIFSeekFile, GIFDraw)) {
-      gifOffen = true;
-    } else {
-      Serial.println("GIF konnte nicht geoeffnet werden (Datei fehlt?)");
-      delay(1000); // avoid hammering in a tight loop if the file is missing
-      return;
-    }
-  }
-  if (!gif.playFrame(true, NULL)) {
-    gif.close();
-    gifOffen = false; // next call reopens it -> infinite loop
-  }
 }
 
 // Draws one decoded MCU block of a JPEG (still or MJPEG frame) to the display.
