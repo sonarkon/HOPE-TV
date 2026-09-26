@@ -176,6 +176,7 @@ note there) — without it, stills decode just as unreliably as clips do.
 | `/hopetv/fps` | float (1-60) | frame rate for noise/animation (MJPEG clips run at their own native pace) |
 | `/hopetv/bw` | int (0/1) | black & white filter, applied to test pattern, animation, and all clip/slideshow playback |
 | `/hopetv/clip` | int (index) | select a clip by index (0-based, alphabetical — see Serial `clips`), switches to clip mode |
+| `/hopetv/clip/nr` | int (number) | select a clip by its filename number prefix (e.g. `3` → `03_mond_1.jpg`), independent of list position; Serial `clipnr 3` |
 | `/hopetv/slideshow` | int (0/1) | slideshow mode off/on (see Slideshow section above) |
 | `/hopetv/slideshow/speed` | float (seconds) | seconds per slideshow image (default 4) |
 | `/hopetv/slideshow/fade` | int (ms) | total fade transition duration; 0 = off (default) |
