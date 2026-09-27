@@ -128,7 +128,7 @@ JPEGDEC *jpeg;
 
 enum ClipTyp { CLIP_MJPG, CLIP_STILL };
 
-#define MAX_CLIPS 16
+#define MAX_CLIPS 48
 String clipListe[MAX_CLIPS];
 ClipTyp clipTypListe[MAX_CLIPS];
 int anzahlClips = 0;
