@@ -66,8 +66,8 @@
 //   /hopetv/bw             int   0/1  black & white filter off/on
 //   /hopetv/clip           int   index  select a clip by index (0-based, alphabetically
 //                                 sorted, see serial "clips"), switches to clip mode
-//   /hopetv/clip/nr        int   number  select a clip by its filename number prefix
-//                                 (e.g. 3 -> "03_mond_1.jpg"), independent of list position
+//   /hopetv/clip/id        int   number  select a clip by its filename number prefix
+//                                 (e.g. 3 -> "03_mond_1.jpg"), independent of list position (id, not index)
 //   /hopetv/slideshow      int   0/1  slideshow mode off/on (see above)
 //   /hopetv/slideshow/speed float seconds per slideshow image (default 4)
 //   /hopetv/slideshow/fade int   ms   total fade transition duration; 0 = off (default)
@@ -559,16 +559,16 @@ void setzeClip(int index) {
 }
 
 // Selects the clip whose filename starts with the given number ("/03_x.jpg" -> 3).
-void setzeClipNr(int nr) {
+void setzeClipId(int id) {
   for (int i = 0; i < anzahlClips; i++) {
     const char *p = clipListe[i].c_str() + 1; // skip leading '/'
     if (*p < '0' || *p > '9') continue;
-    if (atoi(p) == nr) {
+    if (atoi(p) == id) {
       setzeClip(i);
       return;
     }
   }
-  Serial.println("Kein Clip mit Praefix-Nummer " + String(nr) + " gefunden");
+  Serial.println("Kein Clip mit Praefix-ID " + String(id) + " gefunden");
 }
 
 void setzeSlideshow(bool an) {
@@ -641,9 +641,9 @@ void handleOscClip(OSCMessage &msg) {
   setzeClip(msg.getInt(0));
 }
 
-void handleOscClipNr(OSCMessage &msg) {
+void handleOscClipId(OSCMessage &msg) {
   bootSplashActive = false;
-  setzeClipNr(msg.getInt(0));
+  setzeClipId(msg.getInt(0));
 }
 
 void handleOscSlideshow(OSCMessage &msg) {
@@ -679,7 +679,7 @@ void pruefeSerialBefehle() {
   if (befehl == "help" || befehl == "?") {
     Serial.println("Befehle: mode <0-3> | auto <0/1> | debug <0-2> | power <0/1> |");
     Serial.println("         brightness <0.0-1.0> | fps <1-60> | bw <0/1> |");
-    Serial.println("         clip <index> | clipnr <praefix-nr> | clips (Liste der gefundenen Clips) |");
+    Serial.println("         clip <index> | clipid <praefix-id> | clips (Liste der gefundenen Clips) |");
     Serial.println("         slideshow <0/1> | slidespeed <seconds> | slidefade <ms>");
     Serial.println("debug: 0=aus 1=Info 2=Dateiliste");
     return;
@@ -703,7 +703,7 @@ void pruefeSerialBefehle() {
 
   bool bekannt = (befehl == "mode" || befehl == "auto" || befehl == "debug" ||
                   befehl == "power" || befehl == "brightness" || befehl == "fps" ||
-                  befehl == "bw" || befehl == "clip" || befehl == "clipnr" || befehl == "slideshow" ||
+                  befehl == "bw" || befehl == "clip" || befehl == "clipid" || befehl == "slideshow" ||
                   befehl == "slidespeed" || befehl == "slidefade");
   letzterOscBefehl = "serial:" + zeile + (bekannt ? " [OK]" : " [?]");
 
@@ -715,7 +715,7 @@ void pruefeSerialBefehle() {
   else if (befehl == "fps") setzeFps(wert.toFloat());
   else if (befehl == "bw") setzeBW(wert.toInt() != 0);
   else if (befehl == "clip") setzeClip(wert.toInt());
-  else if (befehl == "clipnr") setzeClipNr(wert.toInt());
+  else if (befehl == "clipid") setzeClipId(wert.toInt());
   else if (befehl == "slideshow") setzeSlideshow(wert.toInt() != 0);
   else if (befehl == "slidespeed") setzeSlideSpeed(wert.toFloat());
   else if (befehl == "slidefade") setzeSlideFade(wert.toInt());
@@ -755,7 +755,7 @@ void pruefeOSC() {
   treffer |= msg.dispatch("/hopetv/fps", handleOscFps);
   treffer |= msg.dispatch("/hopetv/bw", handleOscBW);
   treffer |= msg.dispatch("/hopetv/clip", handleOscClip);
-  treffer |= msg.dispatch("/hopetv/clip/nr", handleOscClipNr);
+  treffer |= msg.dispatch("/hopetv/clip/id", handleOscClipId);
   treffer |= msg.dispatch("/hopetv/slideshow/speed", handleOscSlideshowSpeed);
   treffer |= msg.dispatch("/hopetv/slideshow/fade", handleOscSlideshowFade);
   treffer |= msg.dispatch("/hopetv/slideshow", handleOscSlideshow);
